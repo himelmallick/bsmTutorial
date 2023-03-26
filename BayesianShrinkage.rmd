@@ -1,0 +1,443 @@
+---
+title: "Bayesian Shrinkage Models with Applications to Preclinical Research"
+author: "Erina Paul (erina.paul@merck.com), Arinjita Bhattacharyya, Richard Baumgartner, Himel Mallick"
+output:
+  pdf_document:
+  toc: TRUE
+highlight: null
+---
+
+```{R include=F}
+knitr::opts_chunk$set(cache = F, warning = FALSE, message = FALSE,
+                      fig.align = 'center',
+                      fig.width = 6,
+                      fig.height = 4,
+                      tidy = TRUE, 
+                      tidy.opts = list(width.cutoff = 50))
+```
+
+# Introduction
+
+This tutorial walks through the example applications described in the tutorial paper "Bayesian Shrinkage Models with Applications to Preclinical Research''. Bayesian Shrinkage Models (BSMs) are particularly useful for improving prediction and facilitating uncertainty quantification in high-dimensional regression and classification as an alternative to classical model selection and frequentist penalized regression methods. More details on the methodological details of BSMs are provided in the accompanying manuscript.
+
+In this tutorial, we provide an overview of BSMs for continuous, binary, count, and survival outcomes and demonstrate some use cases of BSMs in R with a particular focus on preclinical applications using one TCGA and one microbiome dataset. These two datasets are briefly discussed in the later sections as well as in the associated manuscript. This tutorial has been led by the *DIA/ASA-BIOP Nonclinical Bayesian Working Group members*.
+
+# Preparing the R workspace
+
+First, users should install and load the following libraries (available from CRAN at the time of writing this tutorial).
+
+```{R include = T}
+
+# Clear workspace
+rm(list = ls())
+
+# Load libraries 
+library(tidyverse) # Data Manipulation
+library(bayesreg) # Fitting BSMs
+library(plotrix) # Credible Interval Plot
+library(coda) # MCMC Diagnostics
+library(psych) # Posterior Histograms
+library(survC1) # C-index for Survival Data
+library(pROC) # AUC Calculation
+library(Rfssa) # Load Data from GitHub 
+```
+
+# Loading and previewing the TCGA data
+
+This first preclinical dataset (TCGA) is obtained from [Huang et al. (2020)](https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1007607), where the predictors are gene expression measurements (log-transformed FPKM values with a pseudo count of 0.1) from 979 samples (cancer cell lines from 55 different tissues). The processed dataset, which consists of 13,941 genes is available from <https://github.com/emad2/TG-LASSO>. For illustration purposes, we further pre-process and filter the dataset by first removing genes with low variability and then selecting the 100 most variable genes based on gene expression across all samples.
+
+The outcome variable of interest is the clinical drug response (CDR) in these cancer patients who were administered 23 drugs in total. The primary goal of the analysis is to assess drug response prediction performance based on preclinical molecular profiles and identify biomarkers of drug sensitivity and survival. Among the 23 potential continuous response variables (logarithm of half-maximal inhibitory concentration (log (IC50)) of 979 cancer cell lines), we selected the one with the least amount of missing values (**tamoxifen**) throughout the tutorial as the outcome. We also consider the transformed versions of the same variable to showcase the application of BSM to binary and count outcomes in the subsequent sections.
+
+Analysis codes to perform the above pre-processing steps are available from <https://github.com/himelmallick/bsmTutorial>.
+
+In the code snippet below, we first load the dataset into R and extract the gene expression data (X) and the outcome data (Y) for further analysis.
+
+```{R include = T}
+
+# Load data 
+load_github_data("https://github.com/himelmallick/bspTutorial/blob/master/data/TGLASSO_filtered.RData")
+trainX=pcl$trainX
+trainY=pcl$trainY
+```
+
+# Remove missing values
+
+Once we have loaded the data, we want to select the response variable of interest among 23 available. We choose the one with the the least amount of missing values, which is **tamoxifen.**
+
+```{R include = T}
+
+ # Find the least amount of missing data 
+sort(apply(trainY, 2, function (x) {length(x[is.na(x)])}), decreasing = FALSE)
+
+# Remove missing values
+missing_index=which(is.na(trainY$tamoxifen))
+trainY=trainY[-missing_index,]
+trainX=trainX[-missing_index, ]
+```
+
+# Sanity Check
+
+Subsequently, we homogenize both these data matrices after removing the missing values and aligning the rows, which we validate as follows.
+
+```{R include = T}
+
+# Sanity Check 
+all(rownames(trainX)==rownames(trainY))
+```
+
+# Shrinkage priors with continuous response
+
+## Standardizing the data
+
+An important starting point before running a regression model is to standardize the predictors. Some packages handle this internally, while others do not; therefore, we recommend performing this standardization of the predictors prior to analysis. Here, we also center the response variable so that the intercept term is zero for the linear model.
+
+```{R include = T}
+
+# Standardization
+y.train   = trainY$tamoxifen - mean(trainY$tamoxifen)
+x.train = scale(as.matrix(trainX))
+df.train = cbind.data.frame(y.train, x.train)
+```
+
+Now, we fit BSMs and consider four shrinkage priors, all implemented in the `bayesreg` package: Horseshoe, Horseshoe+, Bayesian Ridge (BR), and Bayesian LASSO (BL). In all models, we use 1,000 samples of the Gibbs sampler after 10, 000 burn-in, with other parameters fixed at their default values.
+
+```{R include = T}
+
+# Horseshoe 
+set.seed(1234)
+fit.hs = bayesreg(y.train ~., df.train, prior = "hs", burnin = 10000) 
+mse.hs = fit.hs$rootmse
+
+# Horseshoe plus
+fit.hsplus = bayesreg(y.train~., df.train, prior="horseshoe+", burnin = 10000) 
+mse.hsplus  = fit.hsplus$rootmse
+
+# Bayesian Ridge
+fit.br = bayesreg(y.train ~., df.train, prior = "ridge", burnin = 10000) 
+mse.br = fit.br$rootmse
+
+# Bayesian LASSO 
+fit.bl = bayesreg(y.train~., df.train, prior="lasso", burnin = 10000)
+mse.bl  = fit.bl$rootmse
+```
+
+For the continuous response model, we consider mean squared error (MSE) for performance assessment.
+
+```{R include = T}
+
+# MSE
+mse.val = rbind(mse.hs, mse.hsplus, mse.br, mse.bl)
+colnames(mse.val) = "MSE"
+row.names(mse.val) = c("Horseshoe", "Horseshoe+", "Bayesian Ridge", "Bayesian LASSO")
+mse.val
+```
+
+For the visualization, we consider four types of plots: Auto Correlation Function (ACF), trace, histogram, and credible interval (CI) for the top 10 $\beta$'s based on the absolute posterior median estimates. Without the exception of the CI plot, we only show the plots corresponding to the Bayesian LASSO for brevity but they can be similarly generated for other shrinkage priors and regression models.
+
+```{R include = T}
+
+# Visualization (Top 10 Beta)
+# Find the top 10 absolute values based on the posterior median
+top_n = 10
+
+# HS
+topbeta = apply(abs(t(fit.hs$beta)), 2, median)
+topbetas = topbeta[order(topbeta, decreasing = TRUE)]
+index_top = rep(NA, top_n)
+for(i in 1:top_n){
+  index_top[i] = which(topbeta == topbetas[i])
+}
+
+# Extract top 10 beta
+topBeta_hs = t(fit.hs$beta[index_top,])
+
+# HS+
+topbeta = apply(abs(t(fit.hsplus$beta)), 2, median)
+topbetas = topbeta[order(topbeta, decreasing = TRUE)]
+index_top = rep(NA, top_n)
+for(i in 1:top_n){
+  index_top[i] = which(topbeta == topbetas[i])
+}
+
+# Extract top 10 beta
+topBeta_hsplus = t(fit.hsplus$beta[index_top,])
+
+# BR
+topbeta = apply(abs(t(fit.br$beta)), 2, median)
+topbetas = topbeta[order(topbeta, decreasing = TRUE)]
+index_top = rep(NA, top_n)
+for(i in 1:top_n){
+  index_top[i] = which(topbeta == topbetas[i])
+}
+
+# Extract top 10 beta
+topBeta_br = t(fit.br$beta[index_top,])
+
+# BL
+topbeta = apply(abs(t(fit.bl$beta)), 2, median)
+topbetas = topbeta[order(topbeta, decreasing = TRUE)]
+index_top = rep(NA, top_n)
+for(i in 1:top_n){
+  index_top[i] = which(topbeta == topbetas[i])
+}
+
+# Extract top 10 beta
+topBeta_bl = t(fit.bl$beta[index_top,])
+
+#############
+# ACF plots #
+#############
+
+beta.bl = as.mcmc(topBeta_bl)
+par(mfrow = c(3, 4))
+acf(beta.bl[1,])
+acf(beta.bl[2,])
+acf(beta.bl[3,])
+acf(beta.bl[4,])
+acf(beta.bl[5,])
+acf(beta.bl[6,])
+acf(beta.bl[7,])
+acf(beta.bl[8,])
+acf(beta.bl[9,])
+acf(beta.bl[10,])
+```
+
+```{R include = T}
+
+# Trace plots 
+
+par(mfrow = c(3, 4))
+traceplot(beta.bl, density = FALSE, smooth = TRUE)
+```
+
+```{R include = T}
+
+# Histogram 
+
+multi.hist(beta.bl, density=TRUE, main = "", ncol = 5)
+```
+
+```{R include = T}
+
+# CI plot 
+# Assuming each posterior sample matrix has p columns and M samples
+
+cred1 = apply(topBeta_hs, 2, quantile, prob = c(0.025, 0.5, 0.975)) # HS
+cred2 = apply(topBeta_hsplus, 2, quantile, prob = c(0.025, 0.5, 0.975)) # HS+
+cred3 = apply(topBeta_br, 2, quantile, prob = c(0.025, 0.5, 0.975)) # BR
+cred4 = apply(topBeta_bl, 2, quantile, prob = c(0.025, 0.5, 0.975)) # LASSO
+
+L1 = cred1[1,]; L2 = cred2[1,]; L3 = cred3[1,]; L4 = cred4[1,]
+m.cre1 = cred1[2,]; m.cre2 = cred2[2,]; m.cre3 = cred3[2,]; m.cre4 =cred4[2,]
+U1 = cred1[3,]; U2 = cred2[3,]; U3 = cred3[3,]; U4 = cred4[3,]
+xOff = 0.1
+Q = 10
+
+plotCI(c(m.cre1, m.cre2, m.cre3, m.cre4),
+       x = c((1:Q)-2*xOff, (1:Q), (1:Q)+2*xOff, (1:Q)+4*xOff),
+       ui = c(U1, U2, U3, U4),
+       li = c(L1, L2, L3, L4),
+       xlab = "betas",
+       ylab = "Estimates",
+       axes = FALSE,
+       lwd = 1,
+       ylim = c(-0.2, 0.3),
+       font = 1,
+       cex.lab = 1,
+       scol = "orange3",
+       col = rep(c("violet", "brown", "purple", "deeppink"), each = Q),
+       cex = 1,
+       cex.axis = 1,
+       pch = rep(15:18, each = Q))
+axis(1, 1:Q, font = 1, cex.axis = 1, adj = 0, las = 1)
+axis(2)
+box()
+abline(h = 0, lty = 2, lwd = 2, col = "gray60")
+legend(8, 0.3, c("HS", "HS+", "BR", "BL"), pch = c(15, 16, 17, 18), pt.cex = 1,
+       text.width = 1, col = c("violet", "brown", "purple", "deeppink"))
+```
+
+Several observations are in order. First, for this particular example, Bayesian LASSO has the best prediction performance based on the MSE. In reality, this should be based on a test dataset, which is not available for this example. Second, while the ACF plots reveal that the auto-correlations decay to zero rapidly, the trace plots show the history of the parameters across iterations implying that the MCMC chain traverses the posterior space very fast, confirming that the corresponding sampler has good mixing property to facilitate meaningful inference. Third, the histograms of the posterior samples of 1,000 iterations reveal that the posterior distributions are approximately normally distributed as expected. Finally, the CI plots highlight that BSMs provide a valid measure of standard error as a measure of uncertainty, not easily measurable by frequentist methods.
+
+# Save the output
+
+This tutorial is just a starting point of what can be done with a default Bayesian analysis with BSMs but for further downstream analyses, we can save the model output using the following code (example shown for the Horseshoe regression):
+
+`save(fit.hs, file = 'fit.HSContinuous.RData')`
+
+# Shrinkage priors with binary response
+
+Next, we showcase the same 4 shrinkage priors for a binary response. We use the same TCGA dataset as before and transform the continuous response (**tamoxifen**) to binary data by setting individuals with the greater than median drug response as 1 and the rest as 0.
+
+```{R include = T}
+
+# Creating binary response variable: Y 
+y.train.binary = ifelse(trainY$tamoxifen>=median(trainY$tamoxifen), 1, 0)
+y.train.binary = as.factor(y.train.binary)
+df.train=cbind.data.frame(y.train.binary, x.train)
+
+# Horseshoe 
+set.seed(1234)
+fit.hs = bayesreg(y.train.binary ~., df.train, model="logistic", prior = "hs", burnin = 10000) 
+
+# Horseshoe plus
+fit.hsplus = bayesreg(y.train.binary ~., df.train, model="logistic", prior="horseshoe+", burnin = 10000) 
+
+# Bayesian Ridge
+fit.br = bayesreg(y.train.binary ~., df.train, model="logistic", prior = "ridge", burnin = 10000) 
+
+# Bayesian LASSO 
+fit.bl = bayesreg(y.train.binary ~., df.train, model="logistic",prior="lasso", burnin = 10000) 
+```
+
+For binary response, we report the area under the curve (AUC) as the performance metric.
+
+```{R include = T}
+# AUC 
+
+# Horseshoe 
+y.pred = predict(fit.hs, df.train, type='class')
+table.val = table(y.train.binary, y.pred)
+roc.obj = roc(as.numeric(y.train.binary), as.numeric(y.pred))
+auc.val= auc(roc.obj)
+measure.valhs  = c(auc.val)
+
+# Horseshoe+
+y.pred = predict(fit.hsplus, df.train, type='class')
+table.val = table(y.train.binary, y.pred)
+roc.obj = roc(as.numeric(y.train.binary), as.numeric(y.pred))
+auc.val= auc(roc.obj)
+measure.valhsplus  = c(auc.val)
+
+# Bayesian Ridge
+y.pred = predict(fit.br, df.train, type='class')
+table.val = table(y.train.binary, y.pred)
+roc.obj = roc(as.numeric(y.train.binary), as.numeric(y.pred))
+auc.val= auc(roc.obj)
+measure.valbr  = c(auc.val)
+
+# Bayesian LASSO 
+y.pred = predict(fit.bl, df.train, type='class')
+table.val = table(y.train.binary, y.pred)
+roc.obj = roc(as.numeric(y.train.binary), as.numeric(y.pred))
+auc.val= auc(roc.obj)
+measure.valbl = c(auc.val)
+
+measure.val = rbind(measure.valhs[1], measure.valhsplus[1], measure.valbr[1],
+                    measure.valbl[1])
+colnames(measure.val) = c("AUC")
+row.names(measure.val) = c("Horseshoe", "Horseshoe+", "Bayesian Ridge", "Bayesian LASSO")
+measure.val
+```
+
+# Shrinkage priors with count response
+
+```{R include = T}
+
+# Convert the response variable to count outcome
+trainY<- round(exp(trainY))
+
+# Remove missing values 
+missing_index=which(is.na(trainY$tamoxifen))
+trainY=trainY[-missing_index,]
+trainX=trainX[-missing_index, ]
+
+# Standardization 
+y.train = trainY$tamoxifen 
+x.train = scale(as.matrix(trainX))
+df.train = cbind.data.frame(y.train, x.train)
+
+# Horseshoe
+set.seed(1234)
+fit.hs = bayesreg(y.train ~., df.train,  model="poisson", prior = "hs", burnin = 10000)
+mse.hs = fit.hs$rootmse
+
+# Horseshoe plus 
+fit.hsplus = bayesreg(y.train~.,df.train, model="poisson", prior="horseshoe+", burnin = 10000) 
+mse.hsplus  = fit.hsplus$rootmse
+
+# Bayesian Ridge
+fit.br = bayesreg(y.train ~., df.train, model="poisson", prior = "ridge", burnin = 10000) 
+mse.br = fit.br$rootmse
+
+# Bayesian LASSO 
+fit.bl = bayesreg(y.train~.,df.train, model="poisson", prior="lasso", burnin = 10000) 
+mse.bl  = fit.bl$rootmse
+
+mse.val = rbind(mse.hs, mse.hsplus, mse.br, mse.bl)
+colnames(mse.val) = "MSE"
+row.names(mse.val) = c("Horseshoe", "Horseshoe+", "Bayesian Ridge", "Bayesian LASSO")
+mse.val
+```
+
+# Shrinkage prior with survival response
+
+For the survival outcome illustration, we make use of a synthetic microbiome dataset of 100 samples and 353 features available from [Koh et al. (2018)](https://bmcgenomics.biomedcentral.com/articles/10.1186/s12864-018-4599-8), in which real microbial composition of non-obese diabetic (NOD) mice is used as a template to generate the synthetic counts along with the survival outcome. In order to reduce the effect of zero-inflation in microbiome data, features with no variance or with \>50% zeros are removed, leaving with 50 features for final analysis.
+
+We consider the least square approximation (LSA) transformation to convert the survival response to a continuous outcome. This is particularly because, as of this writing, no publicly available implementations exist for fitting high-dimensional Cox regression with BSMs. In our example, LSA is feasible due to the large sample size but it should be used with caution when the sample size is limited as the LSA method heavily depends on large sample theory.
+
+In the illustration below, we start with an already LSA-transformed response (analysis codes to perform the LSA pre-processing step is available from <https://github.com/himelmallick/bsmTutorial>). We quantify the prediction accuracy as the average Uno's C-statistic, which is a C-index appropriate for right-censored survival data. We use the \emph{Est.Cval} function from the R package \emph{survC1} to carry out this calculation.
+
+```{R include = T}
+
+# Load data 
+load_github_data("https://github.com/himelmallick/bspTutorial/blob/master/data/Survival.RData")
+trainX=pcl$trainX
+trainY=c(pcl$trainY)
+
+# Sanity Check 
+all(rownames(trainX)==rownames(trainY))
+
+# Standardization 
+y.train = trainY$trainY - mean(trainY$trainY)
+x.train = scale(as.matrix(trainX))
+df.train=cbind.data.frame(y.train, x.train)
+
+# Horseshoe 
+set.seed(1234)
+fit.hs = bayesreg(y.train ~., df.train, prior = "hs", burnin = 10000) # Horseshoe regression
+yhat = as.matrix(pcl$original_X_standardized)%*%as.matrix(fit.hs$beta)
+mydata = data.frame(as.matrix(pcl$original_Y), yhat)
+out = Est.Cval(mydata, tau = 2000, nofit=TRUE)
+cindex.valhs = c(out$Dhat)
+
+# Horseshoe+ 
+fit.hsplus = bayesreg(y.train~., df.train, prior = "horseshoe+", burnin = 10000) 
+yhat = as.matrix(pcl$original_X_standardized)%*%as.matrix(fit.hsplus$beta)
+mydata = data.frame(as.matrix(pcl$original_Y), yhat)
+out = Est.Cval(mydata, tau = 2000, nofit=TRUE)
+cindex.valhsplus =   c(out$Dhat)
+
+# BR
+fit.br = bayesreg(y.train ~., df.train, prior = "ridge", burnin = 10000) 
+yhat = as.matrix(pcl$original_X_standardized)%*%as.matrix(fit.br$beta)
+mydata = data.frame(as.matrix(pcl$original_Y), yhat)
+out = Est.Cval(mydata, tau = 2000, nofit=TRUE)
+cindex.valbr =   c(out$Dhat)
+
+# BL 
+fit.bl = bayesreg(y.train~., df.train, prior = "lasso", burnin = 10000) 
+yhat = as.matrix(pcl$original_X_standardized)%*%as.matrix(fit.bl$beta)
+mydata = data.frame(as.matrix(pcl$original_Y), yhat)
+out = Est.Cval(mydata, tau = 2000, nofit=TRUE)
+cindex.valbl =   c(out$Dhat)
+
+cindex.val = rbind(cindex.valhs, cindex.valhsplus, cindex.valbr, cindex.valbl)
+colnames(cindex.val) = "C-index"
+row.names(cindex.val) = c("Horseshoe", "Horseshoe+", "Bayesian Ridge", "Bayesian LASSO")
+cindex.val
+```
+
+## Conclusions
+
+In summary, BSMs have gained stable popularity in the last two decades especially as a flexible and powerful alternative to frequentist penalized regression approaches. We hope that this tutorial serves as a kickstart reference guide to preclinical researchers and practitioners in other related fields interested for the application of BSMs to various problems.
+
+## References
+
+Huang EW, Bhope A, Lim J, Sinha S, Emad A (2020) [Tissue-guided LASSO for prediction of clinical drug response using preclinical samples](https://journals.plos.org/ploscompbiol/article?id=10.1371/journal.pcbi.1007607). *PLoS Computational Biology* 16(1): e1007607. <https://doi.org/10.1371/journal.pcbi.1007607>
+
+Koh H, Livanos AE, Blaser MJ, Li H (2018). [A highly adaptive microbiome-based association test for survival traits](https://bmcgenomics.biomedcentral.com/articles/10.1186/s12864-018-4599-8#citeas). *BMC Genomics* 19, 210. <https://doi.org/10.1186/s12864-018-4599-8>
+
+## Citation
+
+Paul E, Bhattacharyya A, Baumgartner R, Mallick H (2023+). [Bayesian Shrinkage Models with Applications to Preclinical Research](https://github.com/himelmallick/bsmTutorial). *Statistics in Medicine* (In Submission).
